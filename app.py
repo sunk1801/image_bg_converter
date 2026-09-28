@@ -11,22 +11,23 @@ from rembg import new_session, remove
 # ============================================================
 # CONFIGURATION
 # ============================================================
-BACKGROUND_COLOR = "#7CA1BB"       # Change background color here
-MAX_FILE_SIZE_KB = 100             # Output must be strictly below this
-INITIAL_JPEG_QUALITY = 95
-MIN_JPEG_QUALITY = 25
-QUALITY_STEP = 5
-RESIZE_STEP = 0.90
-MIN_DIMENSION = 100
+DEFAULT_BACKGROUND_COLOR = "#7CA1BB"       # Change background color here
+DEFAULT_MAX_FILE_SIZE_KB = 100             # Output must be strictly below this
+DEFAULT_INITIAL_JPEG_QUALITY = 95
+DEFAULT_MIN_JPEG_QUALITY = 25
+DEFAULT_QUALITY_STEP = 5
+DEFAULT_RESIZE_STEP = 0.90
+DEFAULT_MIN_DIMENSION = 100
 
-# AI background-removal model.
-# "bria-rmbg" is used by current rembg releases as the default
-# model and is suitable for general foreground/background separation.
-AI_MODEL = "bria-rmbg"
+# AI background-removal model (LIGHTER for Streamlit).
+# "u2net" is a lightweight model suitable for general foreground/background separation
+# and runs efficiently on CPU/limited hardware.
+# Other lighter alternatives:
+# - "u2net_human_seg" (optimized for human segmentation)
+# - "isnet-general-use" (general purpose, moderate size)
+# - "bria-rmbg" (heavier, more accurate - not recommended for limited resources)
+DEFAULT_AI_MODEL = "u2net"
 
-# Optional: use a lighter model if CPU processing is too slow.
-# Examples supported by rembg include:
-# "u2net", "u2net_human_seg", "isnet-general-use"
 # ============================================================
 
 SUPPORTED_EXTENSIONS = {
@@ -34,10 +35,18 @@ SUPPORTED_EXTENSIONS = {
     ".gif", ".heic", ".heif"
 }
 
+AVAILABLE_AI_MODELS = {
+    "u2net": "⚡ Lightweight (fastest, CPU-friendly)",
+    "u2net_human_seg": "👤 Human Optimized (good for portraits)",
+    "isnet-general-use": "🎯 General Purpose (balanced)",
+    "bria-rmbg": "🔬 Heavy (most accurate, slower)",
+}
+
+
 @st.cache_resource(show_spinner=False)
-def load_ai_session():
+def load_ai_session(model_name):
     """Load the AI model once and reuse it for all images."""
-    return new_session(AI_MODEL)
+    return new_session(model_name)
 
 
 def hex_to_rgb(hex_color):
@@ -47,14 +56,14 @@ def hex_to_rgb(hex_color):
     return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def ai_replace_background(img):
+def ai_replace_background(img, model_name):
     """
     Use AI segmentation to create a foreground alpha mask.
     The original foreground is then composited onto the configured
     solid background. This is much more robust than white-pixel
     replacement for non-white/uneven backgrounds.
     """
-    session = load_ai_session()
+    session = load_ai_session(model_name)
 
     rgb = img.convert("RGB")
     source_buffer = io.BytesIO()
@@ -74,7 +83,7 @@ def ai_replace_background(img):
     # AI mask is the alpha channel.
     alpha = foreground.getchannel("A")
 
-    bg = Image.new("RGBA", rgb.size, hex_to_rgb(BACKGROUND_COLOR) + (255,))
+    bg = Image.new("RGBA", rgb.size, hex_to_rgb(st.session_state.get("background_color", DEFAULT_BACKGROUND_COLOR)) + (255,))
     composed = Image.composite(foreground, bg, alpha)
 
     return composed.convert("RGB")
@@ -92,37 +101,37 @@ def encode_jpeg(img, quality):
     return buffer.getvalue()
 
 
-def compress_under_limit(img):
+def compress_under_limit(img, max_size_kb, initial_quality, min_quality, quality_step, resize_step, min_dimension):
     """
     Quality reduction first. If quality reaches the configured minimum,
     reduce dimensions and retry. The result is strictly below the
     configured byte limit.
     """
-    limit = MAX_FILE_SIZE_KB * 1024
+    limit = max_size_kb * 1024
     working = img.convert("RGB")
 
     while True:
-        quality = INITIAL_JPEG_QUALITY
+        quality = initial_quality
 
-        while quality >= MIN_JPEG_QUALITY:
+        while quality >= min_quality:
             data = encode_jpeg(working, quality)
             if len(data) < limit:
                 return data, working.size, quality
 
-            quality -= QUALITY_STEP
+            quality -= quality_step
 
-        if min(working.size) <= MIN_DIMENSION:
+        if min(working.size) <= min_dimension:
             # Last-resort dimension reduction.
             scale = 0.80
         else:
-            scale = RESIZE_STEP
+            scale = resize_step
 
         new_width = max(1, int(working.width * scale))
         new_height = max(1, int(working.height * scale))
 
         if (new_width, new_height) == working.size:
             raise ValueError(
-                f"Could not compress image below {MAX_FILE_SIZE_KB} KB."
+                f"Could not compress image below {max_size_kb} KB."
             )
 
         working = working.resize(
@@ -136,10 +145,10 @@ def open_image(data):
         return ImageOps.exif_transpose(source).convert("RGB")
 
 
-def process_image(data):
+def process_image(data, model_name, max_size_kb, initial_quality, min_quality, quality_step, resize_step, min_dimension):
     img = open_image(data)
-    segmented = ai_replace_background(img)
-    return compress_under_limit(segmented)
+    segmented = ai_replace_background(img, model_name)
+    return compress_under_limit(segmented, max_size_kb, initial_quality, min_quality, quality_step, resize_step, min_dimension)
 
 
 def extract_zip(uploaded_zip):
@@ -200,28 +209,120 @@ st.markdown(
 **Pipeline:**
 
 `Any Image → RGB → AI Foreground Segmentation → `
-`Background {BACKGROUND_COLOR} → JPG → < {MAX_FILE_SIZE_KB} KB`
+`Solid Background → JPG → < 100 KB`
 """
 )
+
+# Initialize session state with defaults
+if "background_color" not in st.session_state:
+    st.session_state.background_color = DEFAULT_BACKGROUND_COLOR
+if "max_file_size_kb" not in st.session_state:
+    st.session_state.max_file_size_kb = DEFAULT_MAX_FILE_SIZE_KB
+if "ai_model" not in st.session_state:
+    st.session_state.ai_model = DEFAULT_AI_MODEL
+if "initial_jpeg_quality" not in st.session_state:
+    st.session_state.initial_jpeg_quality = DEFAULT_INITIAL_JPEG_QUALITY
+if "min_jpeg_quality" not in st.session_state:
+    st.session_state.min_jpeg_quality = DEFAULT_MIN_JPEG_QUALITY
+if "quality_step" not in st.session_state:
+    st.session_state.quality_step = DEFAULT_QUALITY_STEP
+if "resize_step" not in st.session_state:
+    st.session_state.resize_step = DEFAULT_RESIZE_STEP
 
 with st.sidebar:
     st.header("⚙️ Configuration")
 
-    st.code(
-        f"""BACKGROUND_COLOR = "{BACKGROUND_COLOR}"
-MAX_FILE_SIZE_KB = {MAX_FILE_SIZE_KB}
-AI_MODEL = "{AI_MODEL}"
-INITIAL_JPEG_QUALITY = {INITIAL_JPEG_QUALITY}
-MIN_JPEG_QUALITY = {MIN_JPEG_QUALITY}
-QUALITY_STEP = {QUALITY_STEP}
-RESIZE_STEP = {RESIZE_STEP}""",
-        language="python"
+    st.subheader("🎨 Background Color")
+    background_color = st.color_picker(
+        "Select background color",
+        value=st.session_state.background_color,
+        key="bg_color_picker"
     )
+    st.session_state.background_color = background_color
 
+    st.subheader("🤖 AI Model")
+    ai_model = st.selectbox(
+        "Choose AI model (lighter = faster)",
+        options=list(AVAILABLE_AI_MODELS.keys()),
+        format_func=lambda x: AVAILABLE_AI_MODELS[x],
+        index=list(AVAILABLE_AI_MODELS.keys()).index(st.session_state.ai_model),
+        key="model_selector"
+    )
+    st.session_state.ai_model = ai_model
+
+    if ai_model == "bria-rmbg":
+        st.warning("⚠️ Heavy model - may be slow on limited hardware")
+    elif ai_model == "u2net":
+        st.success("✅ Lightweight & fast")
+
+    st.subheader("📦 Compression Settings")
+    max_file_size_kb = st.slider(
+        "Max file size (KB)",
+        min_value=50,
+        max_value=500,
+        value=st.session_state.max_file_size_kb,
+        step=10,
+        key="max_size_slider"
+    )
+    st.session_state.max_file_size_kb = max_file_size_kb
+
+    initial_quality = st.slider(
+        "Initial JPEG quality",
+        min_value=50,
+        max_value=100,
+        value=st.session_state.initial_jpeg_quality,
+        step=5,
+        key="init_quality_slider"
+    )
+    st.session_state.initial_jpeg_quality = initial_quality
+
+    min_quality = st.slider(
+        "Minimum JPEG quality",
+        min_value=10,
+        max_value=50,
+        value=st.session_state.min_jpeg_quality,
+        step=5,
+        key="min_quality_slider"
+    )
+    st.session_state.min_jpeg_quality = min_quality
+
+    quality_step = st.slider(
+        "Quality reduction step",
+        min_value=1,
+        max_value=10,
+        value=st.session_state.quality_step,
+        key="quality_step_slider"
+    )
+    st.session_state.quality_step = quality_step
+
+    resize_step = st.slider(
+        "Resize reduction factor",
+        min_value=0.70,
+        max_value=0.99,
+        value=st.session_state.resize_step,
+        step=0.02,
+        key="resize_step_slider"
+    )
+    st.session_state.resize_step = resize_step
+
+    st.divider()
     st.info(
-        "The AI model runs locally after installation. "
+        "The AI model runs locally. "
         "The first run downloads the model weights; subsequent runs "
         "reuse the cached model."
+    )
+
+    # Display current config
+    st.markdown("**Current Configuration:**")
+    st.code(
+        f"""BACKGROUND_COLOR = "{st.session_state.background_color}"
+MAX_FILE_SIZE_KB = {st.session_state.max_file_size_kb}
+AI_MODEL = "{st.session_state.ai_model}"
+INITIAL_JPEG_QUALITY = {st.session_state.initial_jpeg_quality}
+MIN_JPEG_QUALITY = {st.session_state.min_jpeg_quality}
+QUALITY_STEP = {st.session_state.quality_step}
+RESIZE_STEP = {st.session_state.resize_step}""",
+        language="python"
     )
 
 uploaded_files = st.file_uploader(
@@ -277,11 +378,20 @@ if uploaded_files:
 
                 status.write(
                     f"AI processing `{input_path}` "
-                    f"({index}/{len(image_items)})..."
+                    f"({index}/{len(image_items)}) using {st.session_state.ai_model}..."
                 )
 
                 try:
-                    output_data, dimensions, quality = process_image(data)
+                    output_data, dimensions, quality = process_image(
+                        data,
+                        st.session_state.ai_model,
+                        st.session_state.max_file_size_kb,
+                        st.session_state.initial_jpeg_quality,
+                        st.session_state.min_jpeg_quality,
+                        st.session_state.quality_step,
+                        st.session_state.resize_step,
+                        DEFAULT_MIN_DIMENSION
+                    )
 
                     source_path = Path(input_path)
                     parent = str(source_path.parent)
