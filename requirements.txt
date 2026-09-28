@@ -1,0 +1,8 @@
+streamlit
+Pillow
+numpy
+torch
+torchvision
+rembg
+onnxruntime
+pillow-heif
